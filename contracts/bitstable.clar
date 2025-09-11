@@ -203,3 +203,109 @@
     (ok true)
   )
 )
+
+;; Repay stablecoin debt
+(define-public (repay-debt (amount uint))
+  (let (
+      (vault (unwrap! (map-get? user-vaults tx-sender) ERR_VAULT_NOT_FOUND))
+      (current-debt (get debt-amount vault))
+    )
+    (asserts! (is-protocol-active) ERR_PROTOCOL_NOT_INITIALIZED)
+    (asserts! (>= current-debt amount) ERR_INSUFFICIENT_BALANCE)
+
+    (map-set user-vaults tx-sender
+      (merge vault {
+        debt-amount: (- current-debt amount),
+        last-interaction: burn-block-height,
+      })
+    )
+    (var-set total-stablecoin-supply (- (var-get total-stablecoin-supply) amount))
+
+    (print {
+      event: "debt-repaid",
+      user: tx-sender,
+      amount: amount,
+      remaining-debt: (- current-debt amount),
+    })
+    (ok true)
+  )
+)
+
+;; Withdraw collateral from vault
+(define-public (withdraw-collateral (amount uint))
+  (let (
+      (vault (unwrap! (map-get? user-vaults tx-sender) ERR_VAULT_NOT_FOUND))
+      (current-collateral (get collateral-amount vault))
+      (current-debt (get debt-amount vault))
+      (new-collateral (- current-collateral amount))
+      (new-ratio (calculate-collateral-ratio new-collateral current-debt))
+    )
+    (asserts! (is-protocol-active) ERR_PROTOCOL_NOT_INITIALIZED)
+    (asserts! (var-get price-feed-active) ERR_INVALID_PRICE_FEED)
+    (asserts! (>= current-collateral amount) ERR_INSUFFICIENT_BALANCE)
+    (asserts!
+      (or
+        (is-eq current-debt u0)
+        (>= new-ratio (var-get minimum-collateral-ratio))
+      )
+      ERR_BELOW_MINIMUM_RATIO
+    )
+
+    ;; Transfer STX back to user
+    (try! (as-contract (stx-transfer? amount (as-contract tx-sender) tx-sender)))
+
+    (map-set user-vaults tx-sender
+      (merge vault {
+        collateral-amount: new-collateral,
+        last-interaction: burn-block-height,
+      })
+    )
+    (var-set total-collateral-locked (- (var-get total-collateral-locked) amount))
+
+    (print {
+      event: "collateral-withdrawn",
+      user: tx-sender,
+      amount: amount,
+      new-ratio: new-ratio,
+    })
+    (ok true)
+  )
+)
+
+;; LIQUIDATION SYSTEM
+
+(define-public (liquidate-vault (vault-owner principal))
+  (let (
+      (vault (unwrap! (map-get? user-vaults vault-owner) ERR_VAULT_NOT_FOUND))
+      (collateral (get collateral-amount vault))
+      (debt (get debt-amount vault))
+      (collateral-ratio (calculate-collateral-ratio collateral debt))
+    )
+    (asserts! (var-get protocol-initialized) ERR_PROTOCOL_NOT_INITIALIZED)
+    (asserts! (var-get price-feed-active) ERR_INVALID_PRICE_FEED)
+    (asserts! (is-authorized-liquidator tx-sender) ERR_UNAUTHORIZED)
+    (asserts! (> debt u0) ERR_INVALID_PARAMETER)
+    (asserts! (< collateral-ratio (var-get liquidation-threshold))
+      ERR_INSUFFICIENT_COLLATERAL
+    )
+
+    ;; Clear vault and transfer collateral to liquidator
+    (map-delete user-vaults vault-owner)
+    (var-set total-collateral-locked
+      (- (var-get total-collateral-locked) collateral)
+    )
+    (var-set total-stablecoin-supply (- (var-get total-stablecoin-supply) debt))
+
+    (try! (as-contract (stx-transfer? collateral (as-contract tx-sender) tx-sender)))
+
+    (print {
+      event: "vault-liquidated",
+      vault-owner: vault-owner,
+      liquidator: tx-sender,
+      collateral: collateral,
+      debt: debt,
+      ratio: collateral-ratio,
+    })
+    (ok true)
+  )
+)
