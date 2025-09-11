@@ -96,3 +96,110 @@
 (define-private (is-protocol-active)
   (and (var-get protocol-initialized) (not (var-get emergency-shutdown-enabled)))
 )
+
+(define-private (calculate-collateral-ratio
+    (collateral uint)
+    (debt uint)
+  )
+  (if (is-eq debt u0)
+    u0
+    (/ (* (* collateral (var-get btc-usd-price)) u100) debt)
+  )
+)
+
+;; CORE PROTOCOL FUNCTIONS
+
+;; Initialize the BitStable Protocol
+(define-public (initialize-protocol (initial-btc-price uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (not (var-get protocol-initialized))
+      ERR_PROTOCOL_ALREADY_INITIALIZED
+    )
+    (asserts! (validate-price initial-btc-price) ERR_INVALID_PARAMETER)
+
+    (var-set btc-usd-price initial-btc-price)
+    (var-set price-feed-active true)
+    (var-set protocol-initialized true)
+
+    (print {
+      event: "protocol-initialized",
+      initial-price: initial-btc-price,
+      protocol: PROTOCOL_NAME,
+    })
+    (ok true)
+  )
+)
+
+;; Deposit STX collateral to create or expand vault
+(define-public (deposit-collateral (amount uint))
+  (let (
+      (current-vault (default-to {
+        collateral-amount: u0,
+        debt-amount: u0,
+        last-interaction: u0,
+        accumulated-fees: u0,
+      }
+        (map-get? user-vaults tx-sender)
+      ))
+      (new-collateral (+ (get collateral-amount current-vault) amount))
+    )
+    (asserts! (is-protocol-active) ERR_PROTOCOL_NOT_INITIALIZED)
+    (asserts! (> amount u0) ERR_INVALID_PARAMETER)
+
+    ;; Transfer STX to contract
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+
+    ;; Update vault and global state
+    (map-set user-vaults tx-sender
+      (merge current-vault {
+        collateral-amount: new-collateral,
+        last-interaction: burn-block-height,
+      })
+    )
+    (var-set total-collateral-locked (+ (var-get total-collateral-locked) amount))
+
+    (print {
+      event: "collateral-deposited",
+      user: tx-sender,
+      amount: amount,
+      total-collateral: new-collateral,
+    })
+    (ok true)
+  )
+)
+
+;; Mint stablecoin against collateral
+(define-public (mint-stablecoin (amount uint))
+  (let (
+      (vault (unwrap! (map-get? user-vaults tx-sender) ERR_VAULT_NOT_FOUND))
+      (current-collateral (get collateral-amount vault))
+      (current-debt (get debt-amount vault))
+      (new-debt (+ current-debt amount))
+      (collateral-ratio (calculate-collateral-ratio current-collateral new-debt))
+    )
+    (asserts! (is-protocol-active) ERR_PROTOCOL_NOT_INITIALIZED)
+    (asserts! (var-get price-feed-active) ERR_INVALID_PRICE_FEED)
+    (asserts! (> amount u0) ERR_INVALID_PARAMETER)
+    (asserts! (>= collateral-ratio (var-get minimum-collateral-ratio))
+      ERR_BELOW_MINIMUM_RATIO
+    )
+
+    ;; Update vault
+    (map-set user-vaults tx-sender
+      (merge vault {
+        debt-amount: new-debt,
+        last-interaction: burn-block-height,
+      })
+    )
+    (var-set total-stablecoin-supply (+ (var-get total-stablecoin-supply) amount))
+
+    (print {
+      event: "stablecoin-minted",
+      user: tx-sender,
+      amount: amount,
+      collateral-ratio: collateral-ratio,
+    })
+    (ok true)
+  )
+)
