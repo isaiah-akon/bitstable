@@ -309,3 +309,134 @@
     (ok true)
   )
 )
+
+;; ORACLE SYSTEM
+
+(define-public (update-btc-price (new-price uint))
+  (begin
+    (asserts! (is-authorized-oracle tx-sender) ERR_UNAUTHORIZED)
+    (asserts! (validate-price new-price) ERR_INVALID_PARAMETER)
+
+    (var-set btc-usd-price new-price)
+    (var-set price-feed-active true)
+
+    (print {
+      event: "price-updated",
+      oracle: tx-sender,
+      new-price: new-price,
+    })
+    (ok true)
+  )
+)
+
+;; GOVERNANCE FUNCTIONS
+
+(define-public (update-minimum-collateral-ratio (new-ratio uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (validate-collateral-ratio new-ratio) ERR_INVALID_PARAMETER)
+    (asserts! (> new-ratio (var-get liquidation-threshold)) ERR_INVALID_PARAMETER)
+
+    (var-set minimum-collateral-ratio new-ratio)
+    (print {
+      event: "mcr-updated",
+      new-ratio: new-ratio,
+    })
+    (ok true)
+  )
+)
+
+(define-public (update-liquidation-threshold (new-threshold uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (validate-collateral-ratio new-threshold) ERR_INVALID_PARAMETER)
+    (asserts! (< new-threshold (var-get minimum-collateral-ratio))
+      ERR_INVALID_PARAMETER
+    )
+
+    (var-set liquidation-threshold new-threshold)
+    (print {
+      event: "liquidation-threshold-updated",
+      new-threshold: new-threshold,
+    })
+    (ok true)
+  )
+)
+
+(define-public (authorize-liquidator (liquidator principal))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (map-set authorized-liquidators liquidator true)
+    (print {
+      event: "liquidator-authorized",
+      liquidator: liquidator,
+    })
+    (ok true)
+  )
+)
+
+(define-public (authorize-oracle (oracle principal))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (map-set authorized-oracles oracle true)
+    (print {
+      event: "oracle-authorized",
+      oracle: oracle,
+    })
+    (ok true)
+  )
+)
+
+(define-public (trigger-emergency-shutdown)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (var-set emergency-shutdown-enabled true)
+    (print { event: "emergency-shutdown-triggered" })
+    (ok true)
+  )
+)
+
+;; READ-ONLY FUNCTIONS
+
+(define-read-only (get-vault-info (user principal))
+  (map-get? user-vaults user)
+)
+
+(define-read-only (get-vault-collateral-ratio (user principal))
+  (match (map-get? user-vaults user)
+    vault (ok (calculate-collateral-ratio (get collateral-amount vault)
+      (get debt-amount vault)
+    ))
+    ERR_VAULT_NOT_FOUND
+  )
+)
+
+(define-read-only (is-authorized-liquidator (address principal))
+  (default-to false (map-get? authorized-liquidators address))
+)
+
+(define-read-only (is-authorized-oracle (address principal))
+  (default-to false (map-get? authorized-oracles address))
+)
+
+(define-read-only (get-protocol-info)
+  {
+    minimum-collateral-ratio: (var-get minimum-collateral-ratio),
+    liquidation-threshold: (var-get liquidation-threshold),
+    protocol-fee: (var-get protocol-fee),
+    btc-usd-price: (var-get btc-usd-price),
+    price-feed-active: (var-get price-feed-active),
+    emergency-shutdown: (var-get emergency-shutdown-enabled),
+    total-collateral: (var-get total-collateral-locked),
+    total-supply: (var-get total-stablecoin-supply),
+    protocol-initialized: (var-get protocol-initialized),
+  }
+)
+
+(define-read-only (get-protocol-version)
+  {
+    name: PROTOCOL_NAME,
+    version: "2.0.0",
+    network: "stacks-mainnet",
+  }
+)
